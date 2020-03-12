@@ -17,12 +17,12 @@ private struct Foo  {
 	let i: Int
 
 	var record: Int = 0
-	var defaults: [String]?
+	var defaults: Set<String>?
 }
-extension Foo: Encodable, Decodable, CSVDecode {
+extension Foo: Encodable, Decodable, CSVDecode, Equatable {
 	static var defaultValues: CSVDecode {
-		// Optionals need a value, but won't actually get defaulted if the CSV returns nil
-		return Foo(x: true, y: "Fooy", z: Date(), a: UUID(), i: 0)
+		// Optionals need a value (so the type can be ascertained), but won't actually get defaulted if the CSV returns nil
+		return Foo(x: true, y: "Fooy", z: Date(), a: UUID(), i: 5000)
 	}
 
 	static var csvCodingKeys: [String: String] { [
@@ -46,95 +46,139 @@ extension Foo: Encodable, Decodable, CSVDecode {
 	}
 }
 
-private enum DelMethods: Int, CustomStringConvertible {
-	case begin, end, beginLine, endLine, readField, didFailWithError
-
-	var description: String { String(self.rawValue) }
-}
-private let NIL = "nil"
-
 private func LOG(_ items: Any..., separator: String = " ", terminator: String = "\n") {
 #if DEBUG
         //print("TEST:", items.map{String(describing: $0)}.joined(separator: separator), terminator: terminator)
 #endif
 }
 
+private let TestAssetQueue = DispatchQueue(label: "com.AssetFetcher", qos: .userInitiated)
+
+
 final class XCTest_Stream: XCTestCase, StreamDelegate {
 
     private var expectation = XCTestExpectation(description: "")
+    private var assetQueue = TestAssetQueue
 
 	private var p: CSVParser!
+	private var defaults = Foo.defaultValues
 	private var newParser: CSVParser! { CSVParser(streamDelegate: self, configuration: config, defaults: defaults) }
 	private var config: CSVConfiguration = CSVConfiguration()
-	private var defaults: CSVDecode!
-	private var headers: [String]!
 
-	// Response data
-	private var delegateMessages: [DelMethods] = []
-	private var fields: [String] = []
-	private var lines: [[String]] = []
+	private var objects: [CSVDecode] = []
+	private var events = 0
 
+	private let headers: [String] = ["xx", "yy", "zz", "aa", "ii"]
+
+	
     override func setUp() {
         continueAfterFailure = false
 
-        delegateMessages.removeAll()
-        fields.removeAll()
-        lines.removeAll()
+        events = 0
+        objects.removeAll()
+
+        p = newParser
+        assetQueue.sync { self.p.open() }
+        XCTAssertEqual(events, 1)
     }
 
     override func tearDown() {
 		config = CSVConfiguration()	// it may get mutated after setup()
         expectation = XCTestExpectation(description: "")
+        p = nil
     }
+
+	private func buildData(lines: [[String]]) -> String {
+		var str = ""
+		lines.forEach { (line) in
+			if !str.isEmpty { str += "\n" }
+			str += line.joined(separator: ",")
+		}
+		return str
+	}
 
 	// MARK: - Tests -
 
-	func test000() {
-		do {
-			let h = ["xx", "yy", "zz", "aa", "ii"]
-			let d = try CSVDecoder(defaults: Foo.defaultValues, headers: h)
-			//let f = Foo(x: false, y: "goofy", z: Date.distantFuture, a: UUID(), i: 22)
+	func test_000_Simple() {
+		let date = Date()
+		let uuid = UUID()
+		let oneLine: [String] = [ "Yes", "Gaga", "\(date.timeIntervalSinceReferenceDate)", "\(uuid.uuidString)", "\(-20)"]
+		let str = buildData(lines: [headers, oneLine]) + "\n"
+print("STR", str)
+		let expected = Foo(x: true, y: "Gaga", z: date, a: uuid, i: -20)
 
-			let ti = Date().timeIntervalSinceReferenceDate
-			let uu = UUID().uuidString
-			let scanned: [String: String?] = [
-				"x": 	nil,
-				"y":	"GAGA",
-				"z":	"\(ti)",
-				"a":	"\(uu)",
-				"i":	Optional.none
-			]
+		CSVParser.enableLogging = true
+		runTest(msg: str)
+		assetQueue.sync { self.p.close() }
 
-			let obj = try d.decode(record: 55, from: scanned)
-			print("DECODED:", obj)
-		} catch {
-			print("ERROR:", error)
-		}
-
-
-
-		//let c = CSVDecoder(defaults: defaults, headers: [])
-		//c.run()
+		let results = p.currentObjects()
+		XCTAssertEqual(results.count, 1)
+		guard let result = results[0] as? Foo else { return XCTFail() }
+		XCTAssertEqual(result, expected)
 	}
 
-    func xtest000_ASCII() {
-		p = newParser
+    private func runTest(msg _msg: String, strip: Bool = false) {
+		var msg = _msg
 
-		p.open()
-		runTest(msg: ASCIItable)
-		p.close()
+		msg.withUTF8 { (buffer: UnsafeBufferPointer<UInt8>) -> Void in
+			let _ = assetQueue.sync {
+				self.p.write(buffer.baseAddress!, maxLength: buffer.count)
+			}
+		}
 
-		tearDown()
-		setUp()
-
-		config = CSVConfiguration(removeWhiteSpace: false)
-		p = newParser
-
-		p.open()
-		runTest(msg: ASCIItable)
-		p.close()
+//		var expectedFulfillmentCount = 0
+//
+//        wait(for: [expectation], timeout: TimeInterval(files.count * 10))
+//
+//        var values: [ByURL] = []
+//        self.assetQueue.sync {
+//            self.fetchers.values.forEach({ values.append($0) })
+//        }
+//        for byURL in values {
+//            XCTAssert( !byURL.data.isEmpty )
+//            XCTAssert( byURL.image != nil )
+//        }
     }
 
+    @objc
+    func stream(_ aStream: Stream, handle eventCode: Stream.Event) {
+        //dispatchPrecondition(condition: .onQueue(assetQueue))
+        guard let stream = aStream as? OutputStream else { fatalError() }
+
+        events += 1
+        var closeStream = false
+
+        switch eventCode {
+        case .openCompleted:
+            XCTAssertEqual(events, 1)
+        case .endEncountered:
+            closeStream = true
+        case .hasBytesAvailable, .hasSpaceAvailable:
+			break
+        case .errorOccurred:
+            aStream.close()
+            if let error = aStream.streamError {
+                print("WTF!!! Error:", error)
+            } else {
+                print("ERROR BUT NO STREAM ERROR!!!")
+            }
+            closeStream = true
+        default:
+            print("UNEXPECTED \(eventCode)", String(describing: eventCode))
+            XCTAssert(false)
+        }
+        if closeStream {
+            stream.close()
+
+            DispatchQueue.main.async {
+                self.expectation.fulfill()
+            }
+        }
+    }
+
+}
+
+#if false
     func xtest_010_NoField() {
 		let csvStrings = ["", "\n", "   ", "   \n"]
 		let expectedMessages: [DelMethods] = [.begin, .end]
@@ -202,7 +246,7 @@ final class XCTest_Stream: XCTestCase, StreamDelegate {
 
 			self.config = config
 			p = newParser
-	
+
 			p.open()
 			runTest(msg: csv)
 			p.close()
@@ -225,24 +269,5 @@ if lines != expectedLines {
 			tearDown()
 		}
 	}
-    private func runTest(msg _msg: String, strip: Bool = false) {
-		var msg = _msg
 
-		msg.withUTF8 { (buffer: UnsafeBufferPointer<UInt8>) -> Void in
-			let _ = self.p.write(buffer.baseAddress!, maxLength: buffer.count)
-		}
-
-//		var expectedFulfillmentCount = 0
-//
-//        wait(for: [expectation], timeout: TimeInterval(files.count * 10))
-//
-//        var values: [ByURL] = []
-//        self.assetQueue.sync {
-//            self.fetchers.values.forEach({ values.append($0) })
-//        }
-//        for byURL in values {
-//            XCTAssert( !byURL.data.isEmpty )
-//            XCTAssert( byURL.image != nil )
-//        }
-    }
-}
+#endif

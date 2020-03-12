@@ -16,6 +16,8 @@ It supports two types of modes: a *traditional* delegate interface based on [*CH
 * optionals: empty fields return *nil*
 * *Table* and *State Machine* driven—no pointer arithmetic. Enable LOG messages to observe
 * Any character can be the delimiter (defaults to ',')
+* All non-printing ASCII characters (0-31 and 127) result in an error no matter where they occur.
+
 
 In addition to RFC-4180, support for oddities mentioned in an [RFC referenced document](http://www.creativyst.com/Doc/Articles/CSV/CSV01.htm):
 

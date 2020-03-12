@@ -34,6 +34,8 @@ final class XCTest_Delegate: XCTestCase {
 	private var fields: [String] = []
 	private var lines: [[String]] = []
 
+#warning("Need to test tab delimiter")
+
     override func setUp() {
         continueAfterFailure = false
 
@@ -48,8 +50,7 @@ final class XCTest_Delegate: XCTestCase {
     }
 
 	// MARK: - Tests -
-
-    func test000_ASCII() {
+    func test_000_ASCII() {
 		p = newParser
 
 		p.open()
@@ -69,7 +70,7 @@ final class XCTest_Delegate: XCTestCase {
 		p.close()
     }
 
-    func xtest_010_NoField() {
+    func test_010_NoField() {
 		let csvStrings = ["", "\n", "   ", "   \n"]
 		let expectedMessages: [DelMethods] = [.begin, .end]
 		let expectedLines: [[String]] = []
@@ -77,7 +78,7 @@ final class XCTest_Delegate: XCTestCase {
 		loopTest(msgs: csvStrings, expectedMessages: expectedMessages, expectedLines: [expectedLines])
     }
 
-    func xtest_011_NilAndNull() {
+    func test_011_NilAndNull() {
 		let csvStrings = [
 			"\"\",",
 			" \"\",",
@@ -93,7 +94,7 @@ final class XCTest_Delegate: XCTestCase {
 		loopTest(msgs: rCsvStrings, expectedMessages: expectedMessages, expectedLines: [[expectedLines.reversed()]])
     }
 
-    func xtest_020_DoubleQuotes() {
+    func test_020_DoubleQuotes() {
 		//let csv = "Howdie,WOW\nGowie,Fooper,Glom\n"
 		let csvStrings = [
 			"\"xxx\"\"xxx\"\"xxx\"",
@@ -116,7 +117,7 @@ final class XCTest_Delegate: XCTestCase {
 		loopTest(msgs: csvStrings, expectedMessages: expectedMessages, expectedLines: expectedLines)
     }
 
-    func xtest_012_ExcelSpecial() {
+    func test_012_ExcelSpecial() {
 		let csvStrings = [#"="000333""#, "\"=\"\"000333\"\"\""]
 		//let csvStrings = ["\"=\"\"000333\"\"\""]
 		let expectedMessages: [DelMethods] = [.begin, .beginLine, .readField,  .endLine, .end]
@@ -126,7 +127,7 @@ final class XCTest_Delegate: XCTestCase {
 		loopTest(msgs: csvStrings, expectedMessages: expectedMessages, expectedLines: [[expectedLines]], config: config)
     }
 
-    func xtest_020_SingleField() {
+    func test_020_SingleField() {
 		//let csv = "Howdie,WOW\nGowie,Fooper,Glom\n"
 		let csvStrings = ["Howdie",  "   Howdie","Howdie   ","   Howdie   ", "Howdie\n", "Howdie   \n"]
 		let expectedMessages: [DelMethods] = [.begin, .beginLine, .readField, .endLine, .end]

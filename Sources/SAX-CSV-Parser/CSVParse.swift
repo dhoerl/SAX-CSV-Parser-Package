@@ -88,12 +88,16 @@ private typealias ParseFunc = () -> Void
 
 private func LOG(_ items: Any..., separator: String = " ", terminator: String = "\n") {
 #if DEBUG
-        //print("CSV:", items.map{String(describing: $0)}.joined(separator: separator), terminator: terminator)
+	if CSVParser.enableLogging {
+		print("CSV:", items.map{String(describing: $0)}.joined(separator: separator), terminator: terminator)
+	}
 #endif
 }
 
 
 public final class CSVParser: OutputStream {
+	static var enableLogging = false
+
 	private var parseActions: [ParseFunc?] = []
 
 	private var _streamStatus: Stream.Status = .notOpen
@@ -110,7 +114,7 @@ public final class CSVParser: OutputStream {
 				parseActions[ASCII.number.rawValue] = parseNumber
 				parseActions[ASCII.nl.rawValue] = parseNL
 				processChar = processNotNumberChar
-				LOG("State: Normal")
+				LOG("State: Comment")
 			case .normal:
 				parseActions[ASCII.quote.rawValue] = parseQuoteFirst
 				parseActions[config.delim] = parseDelimiter
@@ -203,7 +207,7 @@ public final class CSVParser: OutputStream {
 		return value
 	}
 
-	public func allRecords() -> [[String?]] {
+	public func currentRecords() -> [[String?]] {
 		let value = records
 		records.removeAll()
 		return value
@@ -327,8 +331,10 @@ public final class CSVParser: OutputStream {
 			if !fields.isEmpty {
 				// MUST be after endLine() is called. traditional delegate may have drained the fields via currentFields
 				records.append(fields)
+				fields.removeAll()
 			}
-			_streamDelegate?.stream?(self, handle: .hasBytesAvailable)
+			// Don't think this is worthwhile (and its odd from an OutputStream. After every write, you can get the decoded objects
+			//_streamDelegate?.stream?(self, handle: .hasBytesAvailable)
 
 			beginLine()
 		} else {
@@ -423,13 +429,13 @@ public final class CSVParser: OutputStream {
 
 	private func endLine() {
 		LOG("endLine")
-		var increment = 1
 		let quotesMatch = quoteCount % 2 == 0
 		guard quotesMatch else {
 			let err = CSVbuildError(code: .quoteMissCount, description: "incorrect number of quotes on \(recordCount) <line>")
 			sendError(err)
 			return
 		}
+		defer { recordCount += 1 }
 
 		traditionalDelegate?.csvParserDidEndLine(recordNumber: recordCount)
 
@@ -437,37 +443,43 @@ public final class CSVParser: OutputStream {
 			numFields = fieldNumber
 			//LOG("NUMFIELDS", numFields)
 
-			if config.hasHeader {
-				headers = fields.map({ $0 ?? "" })
-			}
-
-			if _streamDelegate != nil, let defaults = defaults {
+			if _streamDelegate != nil {
 				if config.hasHeader {
-					increment = 0	// not a record
+					headers = fields.map({ $0 ?? "" })
+	print("HEADERS1:", headers)
+				} else {
+	print("HEADERS2:", headers)
 					headers = (0..<fieldNumber).map({ String($0) })
 				}
+
 				do {
-					csvDecoder = try CSVDecoder(defaults: defaults, headers: headers)
+					csvDecoder = try CSVDecoder(defaults: defaults!, headers: headers)
 				} catch {
 					sendError(error)
 					return
 				}
+				if config.hasHeader {
+					return
+				}
+			}
+
+		} else {
+			if numFields != fieldNumber {
+				let err = CSVbuildError(code: .incorrectFieldCount, description: "incorrect number of fields: found \(fieldNumber) but expected \(numFields)")
+				sendError(err)
+				return
 			}
 		}
-		guard numFields == fieldNumber else {
-			let err = CSVbuildError(code: .incorrectFieldCount, description: "incorrect number of fields: found \(fieldNumber) but expected \(numFields)")
-			sendError(err)
-			return
-		}
 
-		if let csvDecoder = csvDecoder, recordCount >= (config.hasHeader ? 1 : 0) {
+		if let csvDecoder = csvDecoder {
 			var fieldsDictionary: [String: String?] = [:]
-			csvDecoder.userFieldNames.enumerated().forEach( {  fieldsDictionary[$1] = fields[$0]  })
+			csvDecoder.userFieldNames.enumerated().forEach( { fieldsDictionary[$1] = fields[$0]  })
 			if let recordScrubber = recordScrubber{
 				fieldsDictionary = recordScrubber(fieldsDictionary)
 			}
 			do {
-				let obj = try csvDecoder.decode(record: recordCount, from: fieldsDictionary)
+				let record = recordCount - (config.hasHeader ? 1 : 0)
+				let obj = try csvDecoder.decode(record: record , from: fieldsDictionary)
 				decodedObjs.append(obj)
 				_streamDelegate?.stream?(self, handle: .hasBytesAvailable)
 			} catch {
@@ -475,8 +487,6 @@ public final class CSVParser: OutputStream {
 				return
 			}
 		}
-
-		recordCount += increment
 	}
 
 	private func EOF() {

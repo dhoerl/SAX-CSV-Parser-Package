@@ -12,7 +12,7 @@ import Foundation
 //extension Optional: OptionalProtocol {}
 
 public let recordNumberProperty	= "CSV_RECORD_NUM"			// make the default 0, but its ignored
-public let defaultedProperties		= "CSV_DEFAULTED_FIELDS"	// will get an array of those property names that got a default
+public let defaultedProperties	= "CSV_DEFAULTED_FIELDS"	// will get a set of those property names that got a default
 
 private func LOG(_ items: Any..., separator: String = " ", terminator: String = "\n") {
 #if DEBUG
@@ -85,10 +85,10 @@ public final class CSVDecoder {
 		do {
 			// get the translation of column headers to internal property names
 			let dict = type(of: defaults).csvCodingKeys
-			headerToProperty = dict
+			propertyToHeader = dict
 			var d: [String: String] = [:]
 			dict.forEach( { (key, value) in d[value] = key })
-			propertyToHeader = d
+			headerToProperty = d
 		}
 
 		do {
@@ -185,14 +185,14 @@ public final class CSVDecoder {
 			}
 		}
 
-		LOG("HEADER2:", propertyToHeader)
+		LOG("HEADER2:", headerToProperty)
 
-		if let key = propertyToHeader[recordNumberProperty], dict[key] == nil {
+		if let key = headerToProperty[recordNumberProperty], dict[key] == nil {
 			if str.count > 5 { str += ",\n" }
 			str += "\"\(key)\":  \(record)"
 		}
 
-		if let key = propertyToHeader[defaultedProperties], dict[key] == nil {
+		if let key = headerToProperty[defaultedProperties], dict[key] == nil {
 			if str.count > 5 { str += ",\n" }
 
 			var s = "\"\(key)\": "
@@ -231,7 +231,7 @@ public final class CSVDecoder {
 				test.remove(key)
 			}
 		}
-		print("SET:", test)
+		//print("OPTIONAL PROPERTY SET:", test)
 		return test
 
 #if false	// Sign. Mirror may not be available in Release versions
@@ -276,7 +276,7 @@ public final class CSVDecoder {
 				let type: PropertyType
 				switch value {
 				case let x as String:
-					print("String", x)
+					//print("String", x)
 					type = .string(x)
 				case let x as NSNumber:
 					// https://developer.apple.com/library/archive/documentation/Cocoa/Conceptual/ObjCRuntimeGuide/Articles/ocrtTypeEncodings.html

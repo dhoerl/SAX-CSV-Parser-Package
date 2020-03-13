@@ -32,12 +32,15 @@ public struct CSVConfiguration {
 	let excelSpecial: Bool		// '=(0001234) hack to preserve leading zeros
 	let allowsComments: Bool	// if '#'is the first character, then ignore that line
 
-	init(delimiter: Character = ",", hasHeader: Bool = true, removeWhiteSpace: Bool = true, excelSpecial: Bool = false, allowsComments: Bool = false) {
+	init(delimiter: Character = ",", hasHeader: Bool = true, removeWhiteSpace: Bool = false, excelSpecial: Bool = false, allowsComments: Bool = false) {
 		self.delimiter = delimiter
 		self.hasHeader = hasHeader
 		self.removeWhiteSpace = removeWhiteSpace
 		self.excelSpecial = excelSpecial
 		self.allowsComments = allowsComments
+
+		//assert(!(removeWhiteSpace && delimiter == Character(unicodeScalarLiteral: ASCII.tab)))
+		assert(!(removeWhiteSpace && delimiter.asciiValue == Character("\t").asciiValue!))
 	}
 
 	var delim: UInt8 { delimiter.asciiValue ?? Character(",").asciiValue! }
@@ -80,7 +83,7 @@ private enum ASCII: UInt8, CaseIterable {
 }
 
 private enum ParseState {
-	case comment, normal, quoteInsideString, quoteLookAtNextChar, quoteLookForEnd, closed, error
+	case look4comment, insideComment, normal, quoteInsideString, quoteLookAtNextChar, quoteLookForEnd, closed, error
 }
 
 // Start String pointer, End string pointer
@@ -98,7 +101,8 @@ private func LOG(_ items: Any..., separator: String = " ", terminator: String = 
 public final class CSVParser: OutputStream {
 	static var enableLogging = false
 
-	private var parseActions: [ParseFunc?] = []
+	private lazy var specialChars: [UInt8] = { [config.delimiter.asciiValue!, ASCII.quote.rawValue, ASCII.space.rawValue, ASCII.tab.rawValue, ASCII.cr.rawValue, ASCII.nl.rawValue, ASCII.number.rawValue] }()
+	private var parseActions: [ParseFunc?] = Array<ParseFunc?>(repeating: nil, count: 256)
 
 	private var _streamStatus: Stream.Status = .notOpen
 	private var _streamError: NSError?
@@ -107,14 +111,18 @@ public final class CSVParser: OutputStream {
 		willSet {
 			guard parseState != .error else { return }
 			//guard parseState != newValue else { return }
-			ASCII.allCases.forEach({ self.parseActions[$0.rawValue] = nil })
-
+			self.specialChars.forEach({ self.parseActions[$0] = nil })
+			LOG(" <end>\n")
 			switch newValue {
-			case .comment:
+			case .look4comment:
 				parseActions[ASCII.number.rawValue] = parseNumber
-				parseActions[ASCII.nl.rawValue] = parseNL
+				parseActions[ASCII.nl.rawValue] = parseCommentNL
 				processChar = processNotNumberChar
-				LOG("State: Comment")
+				LOG("State: LookForComment")
+			case .insideComment:
+				parseActions[ASCII.nl.rawValue] = parseCommentNL
+				processChar = processIgnoreChar
+				LOG("State: IgnoreComment")
 			case .normal:
 				parseActions[ASCII.quote.rawValue] = parseQuoteFirst
 				parseActions[config.delim] = parseDelimiter
@@ -124,9 +132,6 @@ public final class CSVParser: OutputStream {
 				LOG("State: Normal")
 			case .quoteInsideString:
 				parseActions[ASCII.quote.rawValue] = parseQuoteLatter
-				parseActions[config.delim] = nil
-				parseActions[ASCII.cr.rawValue] = nil
-				parseActions[ASCII.nl.rawValue] = nil
 				processChar = processNormalChar
 				LOG("State: QuoteInsideString \(quoteCount)")
 			case .quoteLookAtNextChar:
@@ -148,7 +153,7 @@ public final class CSVParser: OutputStream {
 				processChar = processPostQuotedStringIllegalChar
 				LOG("State: QuoteLookForEnd \(quoteCount)")
 			case .closed, .error:
-				processChar = processEatAllChar
+				processChar = processIgnoreChar
 				LOG("State: CLOSED or ERROR")
 			}
 		}
@@ -182,8 +187,9 @@ public final class CSVParser: OutputStream {
 		parseState = .quoteLookAtNextChar
 		// open() triggers willSet
 
-		recordScrubber = nil
-		defaults = nil
+		self.defaults = nil
+		self.recordScrubber = nil
+
 		super.init(toMemory: ())
 		//super.init(toBuffer buffer: UnsafeMutablePointer<UInt8>(bitmap: 1) capacity: Int)
 	}
@@ -193,6 +199,7 @@ public final class CSVParser: OutputStream {
 		config = configuration
 		self.defaults = defaults
 		self.recordScrubber = recordScrubber
+
 		composer = StringComposer(mapExcelSpecial: config.excelSpecial)
 		_streamStatus = .notOpen
 		parseState = .quoteLookAtNextChar
@@ -215,18 +222,17 @@ public final class CSVParser: OutputStream {
 
 	public func currentObjects() -> [CSVDecode] {
 		let value = decodedObjs
-		records.removeAll()
+		decodedObjs.removeAll()
 		return value
 	}
 
-	private func constructParseActions() {
-		parseActions = [ParseFunc?](repeating: nil, count: 256)
+	private func initializeParseActions() {
 		(0...31).forEach( { parseActions[$0] = parseNonPrinting })
 		parseActions[127] = parseNonPrinting
 	}
 
 	private func setInitialParseState() {
-		parseState = config.allowsComments ? .comment : .normal
+		parseState = config.allowsComments ? .look4comment : .normal
 	}
 
 	// MARK: - Parse Functions -
@@ -306,7 +312,7 @@ public final class CSVParser: OutputStream {
 			composer.ignoreAppend = false
 			//LOG("  RESET QUOTE COUNT 1")
 			quoteCount = 0
-			parseState = .normal
+			setInitialParseState()
 		} catch {
 			sendError(error)
 		}
@@ -350,11 +356,12 @@ public final class CSVParser: OutputStream {
 	}
 
 	private func parseNumber() {
-		processChar = processEatAllChar
+		// first character was '#', so eat rest of line
+		parseState = .insideComment
 	}
 
-	private func parseNLAfterNumber() {
-		processChar = processNotNumberChar
+	private func parseCommentNL() {
+		parseState = .look4comment
 	}
 
 	private func isWhiteSpace(_ c: UInt8) -> Bool {
@@ -364,6 +371,7 @@ public final class CSVParser: OutputStream {
 	// Mark: - State Machine Functions -
 
 	private func processNotNumberChar(c: UInt8) {
+		assert(parseState == .look4comment)
 		parseState = .normal
 		processOneChar(c)
 	}
@@ -377,8 +385,9 @@ public final class CSVParser: OutputStream {
 		LOG("BAD CHAR \(Character( UnicodeScalar(c) ))")
 		let err = CSVbuildError(code: .extraneousChars, description: #"found extraneous character after a quote: "\(c)""#)
 		sendError(err)
-		processChar = processNormalChar
-		processChar(c)
+// NOTE: remove these
+//		processChar = processNormalChar
+//		processChar(c)
 	}
 
 	// At start of a field, used when option to eat white space is on
@@ -388,7 +397,7 @@ public final class CSVParser: OutputStream {
 		processChar(c)
 	}
 
-	private func processEatAllChar(c: UInt8) { }
+	private func processIgnoreChar(c: UInt8) { }
 
 	private func processCharacters(buffer: UnsafeBufferPointer<UInt8>) -> Int {
 		guard _streamError == nil else { print("STREAM ERROR GOT CHARS"); return 0 }
@@ -446,9 +455,7 @@ public final class CSVParser: OutputStream {
 			if _streamDelegate != nil {
 				if config.hasHeader {
 					headers = fields.map({ $0 ?? "" })
-	print("HEADERS1:", headers)
 				} else {
-	print("HEADERS2:", headers)
 					headers = (0..<fieldNumber).map({ String($0) })
 				}
 
@@ -481,7 +488,7 @@ public final class CSVParser: OutputStream {
 				let record = recordCount - (config.hasHeader ? 1 : 0)
 				let obj = try csvDecoder.decode(record: record , from: fieldsDictionary)
 				decodedObjs.append(obj)
-				_streamDelegate?.stream?(self, handle: .hasBytesAvailable)
+				//_streamDelegate?.stream?(self, handle: .hasBytesAvailable)
 			} catch {
 				sendError(error)
 				return
@@ -506,7 +513,7 @@ extension CSVParser {
     public override var streamError: Error? { return _streamError }
 
     public override func open() {
-		constructParseActions()
+		initializeParseActions()
 
 		setInitialParseState()
 		_streamStatus = .open

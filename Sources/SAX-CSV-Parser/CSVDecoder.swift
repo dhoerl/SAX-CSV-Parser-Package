@@ -185,8 +185,6 @@ public final class CSVDecoder {
 			}
 		}
 
-		LOG("HEADER2:", headerToProperty)
-
 		if let key = headerToProperty[recordNumberProperty], dict[key] == nil {
 			if str.count > 5 { str += ",\n" }
 			str += "\"\(key)\":  \(record)"

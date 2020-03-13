@@ -44,6 +44,15 @@ extension Foo: Encodable, Decodable, CSVDecode, Equatable {
 		let decoder = JSONDecoder() // possibly customize
 		return try Self.CSVdecoder(decoder: decoder, from: from) as Foo
 	}
+
+    static func == (lhs: Self, rhs: Self) -> Bool {
+        return
+            lhs.x == rhs.x &&
+            lhs.y == rhs.y &&
+            lhs.z == rhs.z &&
+            lhs.a == rhs.a &&
+            lhs.i == rhs.i
+    }
 }
 
 private func LOG(_ items: Any..., separator: String = " ", terminator: String = "\n") {
@@ -61,9 +70,6 @@ final class XCTest_Stream: XCTestCase, StreamDelegate {
     private var assetQueue = TestAssetQueue
 
 	private var p: CSVParser!
-	private var defaults = Foo.defaultValues
-	private var newParser: CSVParser! { CSVParser(streamDelegate: self, configuration: config, defaults: defaults) }
-	private var config: CSVConfiguration = CSVConfiguration()
 
 	private var objects: [CSVDecode] = []
 	private var events = 0
@@ -74,16 +80,17 @@ final class XCTest_Stream: XCTestCase, StreamDelegate {
     override func setUp() {
         continueAfterFailure = false
 
-        events = 0
         objects.removeAll()
-
-        p = newParser
+		newParser()
+    }
+	func newParser(config: CSVConfiguration = CSVConfiguration(), defaults: CSVDecode = Foo.defaultValues) {
+        events = 0
+        p = CSVParser(streamDelegate: self, configuration: config, defaults: defaults)
         assetQueue.sync { self.p.open() }
         XCTAssertEqual(events, 1)
-    }
+	}
 
     override func tearDown() {
-		config = CSVConfiguration()	// it may get mutated after setup()
         expectation = XCTestExpectation(description: "")
         p = nil
     }
@@ -103,18 +110,61 @@ final class XCTest_Stream: XCTestCase, StreamDelegate {
 		let date = Date()
 		let uuid = UUID()
 		let oneLine: [String] = [ "Yes", "Gaga", "\(date.timeIntervalSinceReferenceDate)", "\(uuid.uuidString)", "\(-20)"]
-		let str = buildData(lines: [headers, oneLine]) + "\n"
-print("STR", str)
-		let expected = Foo(x: true, y: "Gaga", z: date, a: uuid, i: -20)
 
-		CSVParser.enableLogging = true
-		runTest(msg: str)
-		assetQueue.sync { self.p.close() }
+		let config = CSVConfiguration(allowsComments: true)
+		newParser(config: config)
+		// CSVParser.enableLogging = true
+		do {
+			let str = buildData(lines: [headers, oneLine])
+			let expected = Foo(x: true, y: "Gaga", z: date, a: uuid, i: -20)
 
-		let results = p.currentObjects()
-		XCTAssertEqual(results.count, 1)
-		guard let result = results[0] as? Foo else { return XCTFail() }
-		XCTAssertEqual(result, expected)
+			//CSVParser.enableLogging = true
+			runTest(msg: str)
+			//assetQueue.sync { self.p.close() }
+
+			var results = p.currentObjects()
+			XCTAssertEqual(results.count, 0)	// without a close or a NL, no way to know line ended
+
+			runTest(msg: "\n")					// OK end the line!
+
+			results = p.currentObjects()
+			XCTAssertEqual(results.count, 1)
+
+			guard let result = results[0] as? Foo else { return XCTFail() }
+			XCTAssertEqual(result, expected)
+			XCTAssertEqual(result.record, 0)
+		}
+
+		do {
+			let comment: [String] =
+				//["#", ",", "#", " ", "\t"]
+				["#"]
+			let str = buildData(lines: [oneLine, comment, oneLine, comment]) //+ "\n"
+			let expected = Foo(x: true, y: "Gaga", z: date, a: uuid, i: -20)
+
+			runTest(msg: str)
+			assetQueue.sync { self.p.close() }
+
+			var results = p.currentObjects()
+			XCTAssertEqual(results.count, 2)
+
+			if let result = results[0] as? Foo {
+				XCTAssertEqual(result, expected)
+				XCTAssertEqual(result.record, 1)
+			} else {
+				return XCTFail()
+			}
+
+			if let result = results[1] as? Foo {
+				XCTAssertEqual(result, expected)
+				XCTAssertEqual(result.record, 2)
+			} else {
+				return XCTFail()
+			}
+
+			results = p.currentObjects()
+			XCTAssertEqual(results.count, 0)
+		}
 	}
 
     private func runTest(msg _msg: String, strip: Bool = false) {
@@ -147,12 +197,13 @@ print("STR", str)
 
         events += 1
         var closeStream = false
-
+//print("EVENTS:", events, "CODE:", eventCode.rawValue)
         switch eventCode {
         case .openCompleted:
             XCTAssertEqual(events, 1)
         case .endEncountered:
             closeStream = true
+            XCTAssertEqual(events, 2)
         case .hasBytesAvailable, .hasSpaceAvailable:
 			break
         case .errorOccurred:

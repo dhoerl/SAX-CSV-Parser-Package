@@ -21,15 +21,18 @@ public struct AssetData<T> {
 	let totalByteCount: Int64	// -1 means don't know
 }
 
+private let byteRequest = 4096
+
 extension Publisher where Self.Output == AssetData<Data>, Self.Failure == Error {
 
 	func csv2obj<T: CSVDecode>(
-		//queue: DispatchQueue,
+		queue: DispatchQueue,
 		configuration: CSVConfiguration = CSVConfiguration(),
 		defaults: T,
-		recordScrubber: CSVRecordScrubber? = nil
+		recordScrubber: CSVRecordScrubber? = nil,
+		byteRequest: Int = byteRequest
 	) -> AnyPublisher<[AssetData<T>], Error> {
-		let downstream = CSVDecodePublisher(upstream: self.eraseToAnyPublisher(), configuration: configuration, defaults: defaults, recordScrubber: recordScrubber)
+		let downstream = CSVDecodePublisher(queue: queue, upstream: self.eraseToAnyPublisher(), configuration: configuration, defaults: defaults, recordScrubber: recordScrubber, byteRequest: byteRequest)
 		return downstream.eraseToAnyPublisher()
 	}
 
@@ -37,41 +40,42 @@ extension Publisher where Self.Output == AssetData<Data>, Self.Failure == Error 
 extension Publisher where Self.Output == Data, Self.Failure == Error {
 
 	func csv2obj<T: CSVDecode>(
-		//queue: DispatchQueue,
+		queue: DispatchQueue,
 		configuration: CSVConfiguration = CSVConfiguration(),
 		defaults: T,
-		recordScrubber: CSVRecordScrubber? = nil
+		recordScrubber: CSVRecordScrubber? = nil,
+		byteRequest: Int = byteRequest
 	) -> AnyPublisher<[AssetData<T>], Error> {
-		let downstream = CSVDecodePublisher(upstream: self.eraseToAnyPublisher(), configuration: configuration, defaults: defaults, recordScrubber: recordScrubber)
+		let downstream = CSVDecodePublisher(queue: queue, upstream: self.eraseToAnyPublisher(), configuration: configuration, defaults: defaults, recordScrubber: recordScrubber, byteRequest: byteRequest)
 		return downstream.eraseToAnyPublisher()
 	}
 
 }
 private struct CSVDecodePublisher<T: CSVDecode, P: Publisher>: Publisher {
-	//static var assetQueue = DispatchQueue.main
-	//static private var _assetQueue: DispatchQueue { DispatchQueue(label: "com.CSVDecodePublisher", qos: .userInitiated) }
 
 	public typealias Output = [AssetData<T>]
 	public typealias Failure = Error
 
+	let queue: DispatchQueue
 	let upstream: P // AnyPublisher<Data, Error>
 	let configuration: CSVConfiguration
 	let defaults: T
 	let recordScrubber: CSVRecordScrubber?
+	let byteRequest: Int
 
     func receive<S>(subscriber: S) where S: Subscriber, Failure == S.Failure, Output == S.Input {
 		//guard let upstreamSubscriber = upstreamSubscriber else { fatalError() }
 
         let subscription = AssetFetcherSubscription(
+			queue: queue,
 			upstream: upstream,
 			downstreamSubscriber: subscriber,
 			configuration: configuration,
 			defaults: defaults,
-			recordScrubber: recordScrubber
+			recordScrubber: recordScrubber,
+			byteRequest: byteRequest
         )
 		upstream.subscribe(subscription)
-
-        subscriber.receive(subscription: subscription)
     }
 
 }
@@ -83,44 +87,40 @@ private extension CSVDecodePublisher {
 		typealias Input = P.Output 		// for Subscriber
 		typealias Failure = P.Failure	// for Subscriber
 
-		private let standardLen = 4096
         private var runningDemand: Subscribers.Demand = Subscribers.Demand.max(0)
         private var objects: Output = []	// same as DownStream.Input
 
-		//let upstream: AnyPublisher<Data, Error>
-		//var upstream: AnyCancellable?
-        //var downstream: DownStream? // optional so we can nil it on cancel
+        let queue: DispatchQueue
         var upstreamSubscription: Subscription? // AnySubscriber<AssetData<Data>, Error>
         let downstreamSubscriber: DownStream
 
 		let configuration: CSVConfiguration
 		let defaults: T
 		let recordScrubber: CSVRecordScrubber?
+		let byteRequest: Int
 
 		lazy var csvParser: CSVParser = { CSVParser(streamDelegate: self, configuration: configuration, defaults: defaults, recordScrubber: recordScrubber) }()
 
         init(
+			queue: DispatchQueue,
 			upstream: P, // AnyPublisher<AssetData<Data>, Error>,
 			downstreamSubscriber: DownStream,
 			configuration: CSVConfiguration,
 			defaults: T,
-			recordScrubber: CSVRecordScrubber?
+			recordScrubber: CSVRecordScrubber?,
+			byteRequest: Int
         ) {
+			self.queue = queue
 			self.downstreamSubscriber = downstreamSubscriber
 			self.configuration = configuration
 			self.defaults = defaults
 			self.recordScrubber = recordScrubber
+			self.byteRequest = byteRequest
 
 			super.init()
-
-			//self.downstream = downstream
         }
         deinit {
             LOG("DEINIT")
-//            let f = fetcher
-//            AssetFetcher.assetQueue.async {
-//                f.close()
-//            }
 #if UNIT_TESTING
             NotificationCenter.default.post(name: FetcherDeinit, object: nil, userInfo: [AssetURL: url])
 #endif
@@ -129,14 +129,18 @@ private extension CSVDecodePublisher {
 		// MARK: - Subscription
 
         func receive(subscription: Subscription) {	// AnySubscriber<Input, Failure>
+			dispatchPrecondition(condition: .onQueue(queue))
+
 			upstreamSubscription = subscription
 			downstreamSubscriber.receive(subscription: self)
 
 			csvParser.open()
-			upstreamSubscription?.request(Subscribers.Demand.max(standardLen))
+			requestData()	// prime the pump
         }
 
 		func receive(_ input: Input) -> Subscribers.Demand {
+			dispatchPrecondition(condition: .onQueue(queue))
+
 			let data: Data
 			let current: Int64
 			let total: Int64
@@ -171,7 +175,6 @@ private extension CSVDecodePublisher {
 				self.objects.append(AssetData<T>(object: t, currentByteCount: current, totalByteCount: total))
 			}
 			sendData()
-
 			return Subscribers.Demand.unlimited
 		}
 
@@ -186,24 +189,6 @@ private extension CSVDecodePublisher {
             runningDemand += demand
 
             sendData()
-
-
-//            let askLen = howMuchToRead(request: standardCount)
-//            LOG("request, demand:", demand.max ?? "<infinite>", "runningDemand:", runningDemand.max ?? "<infinite>", "ASKLEN:", askLen)
-//
-//            if askLen > 0 && savedData.count > 0 {
-//                let readLen = askLen > savedData.count ? savedData.count : askLen // min won't work
-//                let bytes = UnsafeMutablePointer<UInt8>.allocate(capacity: readLen)  // mutable Data won't let us get a pointer anymore...
-//                let range = 0..<readLen
-//                savedData.copyBytes(to: bytes, from: range)
-//                let data = Data(bytesNoCopy: bytes, count: readLen, deallocator: .custom({ (_, _) in bytes.deallocate() })) // (UnsafeMutableRawPointer, Int)
-//                //let assetData = AssetData(data: data, size: fetcher.size)
-//
-//                savedData.removeSubrange(range)
-//
-////                let assetData: AssetData<Data> = AssetData<Data>(object: data, currentByteCount: -1, totalByteCount: -1)
-////                let _ = downstream.receive(assetData)
-//            }
         }
         func cancel() {
             LOG("CANCELLED")
@@ -232,13 +217,14 @@ private extension CSVDecodePublisher {
 				objects.removeFirst(sendCount)
 			}
 
-			let residualDemand = downstreamSubscriber.receive(sendArray)
-			LOG("Residual Demand", residualDemand)
-
-			if objects.isEmpty {
-				upstreamSubscription?.request(Subscribers.Demand.max(standardLen))
+			queue.async {
+				let residualDemand = self.downstreamSubscriber.receive(sendArray)
+				LOG("Residual Demand", residualDemand)
 			}
 
+			if objects.isEmpty {
+				requestData()
+			}
 		}
 
         private func howMuchToSend() -> Int {
@@ -251,6 +237,12 @@ private extension CSVDecodePublisher {
             }
             return askLen
         }
+
+		private func requestData() {
+			guard let upstreamSubscription = upstreamSubscription else { return }
+			let howMuch = Subscribers.Demand.max(byteRequest)
+			queue.async { upstreamSubscription.request(howMuch) }
+		}
 
 		@objc
 		func stream(_ aStream: Stream, handle eventCode: Stream.Event) {
@@ -569,3 +561,20 @@ class Client : Subscriber {
 ////                self.fetcher.open()
 ////            }
 ////            LOG("INIT")
+
+//            let askLen = howMuchToRead(request: standardCount)
+//            LOG("request, demand:", demand.max ?? "<infinite>", "runningDemand:", runningDemand.max ?? "<infinite>", "ASKLEN:", askLen)
+//
+//            if askLen > 0 && savedData.count > 0 {
+//                let readLen = askLen > savedData.count ? savedData.count : askLen // min won't work
+//                let bytes = UnsafeMutablePointer<UInt8>.allocate(capacity: readLen)  // mutable Data won't let us get a pointer anymore...
+//                let range = 0..<readLen
+//                savedData.copyBytes(to: bytes, from: range)
+//                let data = Data(bytesNoCopy: bytes, count: readLen, deallocator: .custom({ (_, _) in bytes.deallocate() })) // (UnsafeMutableRawPointer, Int)
+//                //let assetData = AssetData(data: data, size: fetcher.size)
+//
+//                savedData.removeSubrange(range)
+//
+////                let assetData: AssetData<Data> = AssetData<Data>(object: data, currentByteCount: -1, totalByteCount: -1)
+////                let _ = downstream.receive(assetData)
+//            }

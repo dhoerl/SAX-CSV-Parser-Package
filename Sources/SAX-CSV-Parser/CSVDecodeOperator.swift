@@ -28,7 +28,7 @@ extension Publisher where Self.Output == AssetData<Data>, Self.Failure == Error 
 		configuration: CSVConfiguration = CSVConfiguration(),
 		defaults: T,
 		recordScrubber: CSVRecordScrubber? = nil
-	) -> AnyPublisher<AssetData<T>, Error> {
+	) -> AnyPublisher<[AssetData<T>], Error> {
 		let downstream = CSVDecodePublisher(upstream: self.eraseToAnyPublisher(), configuration: configuration, defaults: defaults, recordScrubber: recordScrubber)
 		return downstream.eraseToAnyPublisher()
 	}
@@ -41,17 +41,17 @@ extension Publisher where Self.Output == Data, Self.Failure == Error {
 		configuration: CSVConfiguration = CSVConfiguration(),
 		defaults: T,
 		recordScrubber: CSVRecordScrubber? = nil
-	) -> AnyPublisher<AssetData<T>, Error> {
+	) -> AnyPublisher<[AssetData<T>], Error> {
 		let downstream = CSVDecodePublisher(upstream: self.eraseToAnyPublisher(), configuration: configuration, defaults: defaults, recordScrubber: recordScrubber)
 		return downstream.eraseToAnyPublisher()
 	}
 
 }
-private struct CSVDecodePublisher<T: CSVDecode, P: Publisher>: Publisher{
+private struct CSVDecodePublisher<T: CSVDecode, P: Publisher>: Publisher {
 	//static var assetQueue = DispatchQueue.main
 	//static private var _assetQueue: DispatchQueue { DispatchQueue(label: "com.CSVDecodePublisher", qos: .userInitiated) }
 
-	public typealias Output = AssetData<T>
+	public typealias Output = [AssetData<T>]
 	public typealias Failure = Error
 
 	let upstream: P // AnyPublisher<Data, Error>
@@ -78,26 +78,14 @@ private struct CSVDecodePublisher<T: CSVDecode, P: Publisher>: Publisher{
 
 private extension CSVDecodePublisher {
 
-    final class AssetFetcherSubscription<DownStream, P: Publisher>: NSObject, StreamDelegate, Subscription, Subscriber where DownStream: Subscriber, DownStream.Input == AssetData<T>, DownStream.Failure == Error {
+    final class AssetFetcherSubscription<DownStream, P: Publisher>: NSObject, StreamDelegate, Subscription, Subscriber where DownStream: Subscriber, DownStream.Input == [AssetData<T>], DownStream.Failure == Error {
 
-		typealias Input = P.Output // AssetData<Data>
-		typealias Failure = P.Failure
-
+		typealias Input = P.Output 		// for Subscriber
+		typealias Failure = P.Failure	// for Subscriber
 
 		private let standardLen = 4096
-
-//        private let url: URL
-//        private lazy var streamReceiver: StreamReceiver = StreamReceiver(delegate: self)
-//        private lazy var _fileFetcher: FileFetcherStream = FileFetcherStream(url: url, queue: AssetFetcher.assetQueue, delegate: streamReceiver)
-//        private lazy var _webFetcher: WebFetcherStream = {
-//            WebFetcherStream.startMonitoring(onQueue: AssetFetcher.assetQueue)
-//            let fetcher = WebFetcherStream(url: url, delegate: streamReceiver)
-//            return fetcher
-//        }()
-//        private lazy var fetcher: AssetInputStream = { url.isFileURL ? _fileFetcher as AssetInputStream : _webFetcher as AssetInputStream }()
-
         private var runningDemand: Subscribers.Demand = Subscribers.Demand.max(0)
-        private var objects: Array<AssetData<T>> = []
+        private var objects: Output = []	// same as DownStream.Input
 
 		//let upstream: AnyPublisher<Data, Error>
 		//var upstream: AnyCancellable?
@@ -110,9 +98,6 @@ private extension CSVDecodePublisher {
 		let recordScrubber: CSVRecordScrubber?
 
 		lazy var csvParser: CSVParser = { CSVParser(streamDelegate: self, configuration: configuration, defaults: defaults, recordScrubber: recordScrubber) }()
-
-//		var currentBytes: Int64 = 0
-//		var totalBytes: Int64 = 0
 
         init(
 			upstream: P, // AnyPublisher<AssetData<Data>, Error>,
@@ -147,25 +132,49 @@ private extension CSVDecodePublisher {
 			upstreamSubscription = subscription
 			downstreamSubscriber.receive(subscription: self)
 
+			csvParser.open()
 			upstreamSubscription?.request(Subscribers.Demand.max(standardLen))
         }
+
 		func receive(_ input: Input) -> Subscribers.Demand {
+			let data: Data
+			let current: Int64
+			let total: Int64
+
 			switch input {
-			case let data as Data:
+			case let d as Data:
 				LOG("HAHAHA")
+				data = d
+				current = -1
+				total = -1
 			case let asset as AssetData<Data>:
 				LOG("GOOP")
+				data = asset.object
+				current = asset.currentByteCount
+				total = asset.totalByteCount
 			default:
 				fatalError()
 			}
 
+			data.withUnsafeBytes { (bufPtr: UnsafeRawBufferPointer) in
+				if let addr = bufPtr.baseAddress, bufPtr.count > 0 {
+//print("IP WRITE BYTES[\(self.kvp.key)]:", bufPtr.count, "...")
+					let ptr: UnsafePointer<UInt8> = addr.assumingMemoryBound(to: UInt8.self)
+					let _ = self.csvParser.write(ptr, maxLength: bufPtr.count)
+//print("...WRITE BYTES:", bufPtr.count)
+				}
+			}
 
-
-
-
+			// save objects, if demand is there then send them, otherwise hold them. We get to typecast each too
+			csvParser.currentObjects().forEach { (object) in
+				guard let t = object as? T else { return }
+				self.objects.append(AssetData<T>(object: t, currentByteCount: current, totalByteCount: total))
+			}
+			sendData()
 
 			return Subscribers.Demand.unlimited
 		}
+
 		func receive(completion: Subscribers.Completion<Failure>) {
 		}
 
@@ -175,6 +184,10 @@ private extension CSVDecodePublisher {
             LOG("REQUEST")
             // demand is additive: https://www.donnywals.com/understanding-combines-publishers-and-subscribers/
             runningDemand += demand
+
+            sendData()
+
+
 //            let askLen = howMuchToRead(request: standardCount)
 //            LOG("request, demand:", demand.max ?? "<infinite>", "runningDemand:", runningDemand.max ?? "<infinite>", "ASKLEN:", askLen)
 //
@@ -192,7 +205,6 @@ private extension CSVDecodePublisher {
 ////                let _ = downstream.receive(assetData)
 //            }
         }
-
         func cancel() {
             LOG("CANCELLED")
 			guard let upstreamSubscription = upstreamSubscription else { return }
@@ -205,16 +217,40 @@ private extension CSVDecodePublisher {
 //            }
         }
 
-        private func howMuchToRead(request: Int) -> Int {
+		// MARK: - Utility -
+
+		private func sendData() {
+			let haveCount = objects.count
+			let sendCount = howMuchToSend()
+
+			let sendArray: [AssetData<T>]
+			if sendCount == haveCount {
+				sendArray = objects
+				objects.removeAll()
+			} else {
+				sendArray = Array<AssetData<T>>(objects.prefix(sendCount))
+				objects.removeFirst(sendCount)
+			}
+
+			let residualDemand = downstreamSubscriber.receive(sendArray)
+			LOG("Residual Demand", residualDemand)
+
+			if objects.isEmpty {
+				upstreamSubscription?.request(Subscribers.Demand.max(standardLen))
+			}
+
+		}
+
+        private func howMuchToSend() -> Int {
+			let haveLen = objects.count
             let askLen: Int
             if let demandMax = runningDemand.max {
-                askLen = request < demandMax ? request : demandMax
+                askLen = haveLen < demandMax ? haveLen : demandMax
             } else {
-                askLen = request
+                askLen = haveLen	// infinite demand
             }
             return askLen
         }
-
 
 		@objc
 		func stream(_ aStream: Stream, handle eventCode: Stream.Event) {

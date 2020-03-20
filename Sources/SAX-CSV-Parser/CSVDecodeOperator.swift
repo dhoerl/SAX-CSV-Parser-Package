@@ -11,7 +11,7 @@ import Combine
 
 private func LOG(_ items: Any..., separator: String = " ", terminator: String = "\n") {
 #if DEBUG
-    //print("ASSET: " + items.map{String(describing: $0)}.joined(separator: separator), terminator: terminator)
+    print("OPER: " + items.map{String(describing: $0)}.joined(separator: separator), terminator: terminator)
 #endif
 }
 
@@ -34,23 +34,27 @@ extension Publisher where Self.Output == AssetData<Data>, Self.Failure == Error 
 	}
 
 }
+extension Publisher where Self.Output == Data, Self.Failure == Error {
 
-//private protocol StreamReceive: class {
-//    //func stream(_ aStream: Stream, handle eventCode: Stream.Event)
-//    func stream(_: Stream, handle: Stream.Event)
-//}
+	func csv2obj<T: CSVDecode>(
+		//queue: DispatchQueue,
+		configuration: CSVConfiguration = CSVConfiguration(),
+		defaults: T,
+		recordScrubber: CSVRecordScrubber? = nil
+	) -> AnyPublisher<AssetData<T>, Error> {
+		let downstream = CSVDecodePublisher(upstream: self.eraseToAnyPublisher(), configuration: configuration, defaults: defaults, recordScrubber: recordScrubber)
+		return downstream.eraseToAnyPublisher()
+	}
 
-private struct CSVDecodePublisher<T: CSVDecode>: Publisher {
+}
+private struct CSVDecodePublisher<T: CSVDecode, P: Publisher>: Publisher{
 	//static var assetQueue = DispatchQueue.main
 	//static private var _assetQueue: DispatchQueue { DispatchQueue(label: "com.CSVDecodePublisher", qos: .userInitiated) }
 
 	public typealias Output = AssetData<T>
 	public typealias Failure = Error
 
-	let upstream: AnyPublisher<AssetData<Data>, Error>
-
-	//let upstream: AnyPublisher<Data, Error>
-
+	let upstream: P // AnyPublisher<Data, Error>
 	let configuration: CSVConfiguration
 	let defaults: T
 	let recordScrubber: CSVRecordScrubber?
@@ -59,7 +63,7 @@ private struct CSVDecodePublisher<T: CSVDecode>: Publisher {
 		//guard let upstreamSubscriber = upstreamSubscriber else { fatalError() }
 
         let subscription = AssetFetcherSubscription(
-			//upstream: upstream,
+			upstream: upstream,
 			downstreamSubscriber: subscriber,
 			configuration: configuration,
 			defaults: defaults,
@@ -74,10 +78,10 @@ private struct CSVDecodePublisher<T: CSVDecode>: Publisher {
 
 private extension CSVDecodePublisher {
 
-    final class AssetFetcherSubscription<DownStream>: NSObject, StreamDelegate, Subscription, Subscriber where DownStream: Subscriber, DownStream.Input == AssetData<T>, DownStream.Failure == Error {
+    final class AssetFetcherSubscription<DownStream, P: Publisher>: NSObject, StreamDelegate, Subscription, Subscriber where DownStream: Subscriber, DownStream.Input == AssetData<T>, DownStream.Failure == Error {
 
-		typealias Input = AssetData<Data>
-		typealias Failure = Error
+		typealias Input = P.Output // AssetData<Data>
+		typealias Failure = P.Failure
 
 
 		private let standardLen = 4096
@@ -111,7 +115,7 @@ private extension CSVDecodePublisher {
 //		var totalBytes: Int64 = 0
 
         init(
-			//upstream: AnyPublisher<AssetData<Data>, Error>,
+			upstream: P, // AnyPublisher<AssetData<Data>, Error>,
 			downstreamSubscriber: DownStream,
 			configuration: CSVConfiguration,
 			defaults: T,
@@ -146,6 +150,20 @@ private extension CSVDecodePublisher {
 			upstreamSubscription?.request(Subscribers.Demand.max(standardLen))
         }
 		func receive(_ input: Input) -> Subscribers.Demand {
+			switch input {
+			case let data as Data:
+				LOG("HAHAHA")
+			case let asset as AssetData<Data>:
+				LOG("GOOP")
+			default:
+				fatalError()
+			}
+
+
+
+
+
+
 			return Subscribers.Demand.unlimited
 		}
 		func receive(completion: Subscribers.Completion<Failure>) {

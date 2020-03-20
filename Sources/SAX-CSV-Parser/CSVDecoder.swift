@@ -3,7 +3,7 @@
 //  CSVParserInSwift
 //
 //  Created by David Hoerl on 2/19/20.
-//  Copyright © 2020 hoerl. All rights reserved.
+//  Copyright © 2020 David Hoerl. All rights reserved.
 //
 
 import Foundation
